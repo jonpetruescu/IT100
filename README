@@ -1,0 +1,89 @@
+Systems Administration Scripts
+
+Jon Petruescu — IT100, Summer 2027
+
+Eight scripts for checking the health and security of Windows and Linux machines. I wrote them for IT100, but I built them to run on real hosts, not just to pass an assignment. Every script handles missing tools, missing permissions, and empty results instead of failing halfway through, and every one returns an exit code so it can run from Task Scheduler, cron, or a monitoring agent.
+
+All eight follow the same convention:
+
+Exit code	Meaning
+0	Clean — nothing flagged
+1	Findings — thresholds breached or issues detected
+2	The script could not run or could not write its report
+
+ollama-check.sh is the exception. It uses the Nagios convention (0 healthy, 1 warning, 2 critical, 3 unknown) so it drops into monitoring systems unchanged.
+
+Windows Scripts
+
+Invoke-SystemHealthCheck.ps1 — Health check for a Windows host. Reports free space on every fixed drive, samples CPU load over a 30-second window, checks available memory, and lists the top 5 processes by CPU. Warns below 20% free disk, above 80% average CPU, and below 500 MB available memory. Writes a report to C:\Temp.
+
+The process list measures CPU consumed during the sampling window rather than lifetime totals. Sorting by Get-Process | Sort CPU only tells you which process has been running longest, which is usually not the one causing the problem.
+
+SystemHealthCheck.ps1 — The earlier version, kept for reference. Checks only the C: drive and adds a Windows Defender status check: antivirus enabled, real-time protection, tamper protection, and signature age.
+
+Get-LocalUserReport.ps1 — Audits every local account and exports to CSV. Reports name, enabled status, last logon, and Administrators group membership, then flags enabled accounts that have never logged on.
+
+Administrators membership resolves through the well-known SID S-1-5-32-544 rather than the literal name, so it works on non-English Windows. Get-LocalGroupMember throws on orphaned and Azure AD member SIDs on several builds, so the script falls back to the ADSI WinNT provider instead of silently reporting zero administrators.
+
+Get-EventLogReport.ps1 — Pulls Error events from the System log and failed logons (Event ID 4625) from the Security log over the last 24 hours, then writes both to one report. Groups System errors by source and event ID, and groups failed logons by account, source IP, and logon type. Flags any source IP with 10 or more attempts or hitting 3 or more accounts, which is what a brute force or password spray looks like in the log.
+
+The 4625 fields are parsed by name out of the event XML. Positional indexes into $_.Properties shift between Windows versions and return the wrong field without telling you.
+
+Linux Scripts
+
+sysinfo.sh — System summary: hostname, IP addresses, OS version, kernel, uptime, memory, and CPU model, plus disk usage for every filesystem with anything above 80% flagged. Writes to ~/sysinfo_<host>_<date>.txt.
+
+Bind mounts report the same device under several mount points, so the script collapses them to one row per device and lists the extra paths separately. Without that, one filesystem at 85% shows up as six separate findings. It also checks inode usage, because a full inode table throws "no space left on device" on a disk that looks half empty.
+
+ollama-check.sh — Health check for an Ollama host, with PASS/FAIL on each item and a HEALTHY / WARNING / CRITICAL verdict. Checks the service state, the bind address, the API, the installed model count, model disk usage, and the journal for errors in the last hour.
+
+Checks that cannot be determined report SKIP, never PASS. An unreadable journal or a missing curl is not the same as a passing check, and a health check that reports success when it could not look is worse than no health check.
+
+ollama-healthcheck.sh — Same checks, but it restarts a stopped service instead of only reporting. Use ollama-check.sh for monitoring and this one for remediation.
+
+user-audit.sh — Lists every account with a real login shell, identifies which have sudo rights and how they got them, and flags any UID 0 account other than root. Also reports empty passwords, NOPASSWD grants, and sudo rules pointing at users who no longer exist.
+
+Sudo detection covers group membership, primary GID, /etc/sudoers, and /etc/sudoers.d. A user whose primary group is sudo never appears in that group's member list, so checking getent group sudo alone misses them. Run it as root — /etc/shadow and /etc/sudoers are not world-readable, and the script says so rather than reporting a clean result it could not verify.
+
+AI Infrastructure Skills
+
+I run Ollama locally and I can administer it as a service rather than only as an application. Concretely:
+
+Manage the service through systemd — check state, restart it, read its journal, and tell the difference between a dead process and a live process with a wedged API.
+Verify what the daemon actually binds to with ss and lsof, instead of trusting the OLLAMA_HOST variable set in my shell. The running process is the only thing that matters here.
+Explain and fix the exposure. Ollama ships with no authentication, so anything that can reach port 11434 can run inference, pull models, and delete them. Binding to 0.0.0.0 puts an unauthenticated API on the network. The fix is OLLAMA_HOST=127.0.0.1:11434 in the unit file, or a reverse proxy with authentication if remote access is actually needed.
+Query the HTTP API directly — /api/tags for installed models and /api/version for the running build — and use it as a fallback when the CLI is unavailable.
+Manage models and the disk they sit on. Model files are large, and I monitor the partition holding ~/.ollama/models separately from the root filesystem.
+Read the journal for real failures, matching Ollama's own level=error format instead of grepping for the word "error" and collecting false positives.
+
+I am still early with this. I have not run Ollama at any scale or behind a proxy in production, and I want to get there.
+
+Certifications Pursuing
+
+CompTIA A+ — Studying now, not yet tested. Core 1 first, then Core 2.
+
+After A+:
+
+CompTIA Network+, then Security+. Network+ gives me the routing and switching fundamentals I keep running into, and Security+ is the baseline requirement for most security roles and for DoD 8570.
+
+CompTIA Linux+ or LPIC-1. The Bash and Ollama work in this repository is the part I enjoy most, and I want the depth on the Linux side to back it up rather than stopping at the helpdesk level.
+
+Running the Scripts
+
+PowerShell scripts need an elevated session. Get-MpComputerStatus returns incomplete data without it, the Security log is unreadable without it, and performance counters need it.
+
+powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\Invoke-SystemHealthCheck.ps1
+.\Get-LocalUserReport.ps1 -OutputPath C:\Audit\users.csv
+.\Get-EventLogReport.ps1 -Hours 24
+
+Bash scripts run as a normal user but report more as root:
+
+bash
+chmod +x *.sh
+./sysinfo.sh
+./ollama-check.sh -o /tmp/ollama-report.txt
+sudo ./user-audit.sh -o audit.csv
+
+Every script takes -h for its options.
